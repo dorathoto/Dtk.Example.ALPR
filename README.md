@@ -105,13 +105,13 @@ Modifications were made to the original library to improve security and performa
 In the `DTKLPR5.cs` file:
 
 ```csharp
-[Obsolete("Usar MoveMemory para melhor compatibilidade")] // "Use MoveMemory for better compatibility"
+[Obsolete("Use MoveMemory for better compatibility")] 
 [DllImport("kernel32.dll", EntryPoint = "CopyMemory", SetLastError = false)]
 public static extern void CopyMemory(IntPtr dest, IntPtr src, int count);
 
-// Nova implementação recomendada: // New recommended implementation:
+// New recommended implementation:
 [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory", SetLastError = false)]
-internal static extern void MoveMemory(IntPtr dest, IntPtr src, IntPtr byteCount); // Suporte a 64-bit // 64-bit support
+internal static extern void MoveMemory(IntPtr dest, IntPtr src, IntPtr byteCount); // Suporte a 64-bit
 ```
 
 ### **Updated `CreateBitmapFromBuffer` Method**
