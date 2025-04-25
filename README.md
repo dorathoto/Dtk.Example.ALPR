@@ -135,14 +135,8 @@ If you want to contribute, open a **PR** or report **issues** in the repository.
 
 -----
 
-**License**: MIT (see `LICENSE` for details).
-
-**Contact**: [[endereço de e-mail removido]]
-
------
+**License**: MIT.
 
 📌 **Note**: This project is still under development. Test locally before using in production.
-
------
 
 🔧 **Happy Coding\!** 🚗📸
