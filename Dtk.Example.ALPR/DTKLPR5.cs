@@ -383,13 +383,23 @@ namespace DTK.LPR
         public static extern void LPREngine_ReloadUSBDongles();
 
         #endregion
+        /// <summary>
+        /// [Obsolete] Incorrect P/Invoke declaration. 'CopyMemory' is not a standard export of kernel32.dll and this call fails with EntryPointNotFoundException on modern .NET runtimes (.NET 5+). Use the 'MoveMemory' (RtlMoveMemory) P/Invoke instead.
+        /// </summary>
         [Obsolete]
         [DllImport("kernel32.dll", EntryPoint = "CopyMemory", SetLastError = false)]
         public static extern void CopyMemory(IntPtr dest, IntPtr src, int count);
 
-
+        /// <summary>
+        /// Correct Win32 API for memory copying, replacing the incorrect P/Invoke 'CopyMemory'.
+        /// Using 'RtlMoveMemory' is necessary for reliability, especially on modern .NET runtimes (.NET 5+)
+        /// which strictly check DLL entry points ('CopyMemory' is not a real export).
+        /// </summary>
+        /// <param name="dest"></param>
+        /// <param name="src"></param>
+        /// <param name="byteCount"></param>
         [DllImport("kernel32.dll", EntryPoint = "RtlMoveMemory", SetLastError = false)]
-        internal static extern void MoveMemory(IntPtr dest, IntPtr src, IntPtr byteCount); // Use IntPtr ou UIntPtr para o tamanho para compatibilidade 64-bit
+        internal static extern void MoveMemory(IntPtr dest, IntPtr src, IntPtr byteCount); // Use IntPtr or UIntPtr for the size for 64-bit compatibility
 
         public static Bitmap CreateBitmapFromBuffer(IntPtr pBuffer, int width, int height, int stride, PIXFMT pixelFormat)
         {

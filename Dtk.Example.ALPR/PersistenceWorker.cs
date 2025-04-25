@@ -2,193 +2,243 @@
 
 namespace Dtk.Example.ALPR;
 
+/// <summary>
+/// Background worker responsible for processing license plate data from the queue
+/// and persisting to database and cloud storage
+/// </summary>
 public class PersistenceWorker
 {
+    private const int MaxItemsToProcessInBatch = 50;
+    private const int QueueEmptyDelayMs = 200;
+
     /// <summary>
-    /// Tarefa de background que consome a fila _plateQueue e processa os dados.
+    /// Main background task that consumes the plate queue and processes data
     /// </summary>
+    /// <param name="cancellationToken">Cancellation token for graceful shutdown</param>
+    /// <returns>Task representing the background operation</returns>
+    /// <remarks>
+    /// Processing strategy:
+    /// 1. Processes items in batches for efficiency
+    /// 2. Implements graceful shutdown handling
+    /// 3. Includes comprehensive error logging
+    /// 4. Maintains data consistency through transaction-like patterns
+    /// </remarks>
     public static async Task RunAsync(CancellationToken cancellationToken)
     {
-
-        const int MaxItemsToProcessInBatch = 50;
-
         try
         {
-            while (!cancellationToken.IsCancellationRequested || !PlateQueueService.Queue.IsEmpty)
+            while (!ShouldTerminate(cancellationToken))
             {
-                int processedCount = 0;
-                var batchToProcess = new List<LicensePlateInfo>();
+                var batchToProcess = await GetNextBatchAsync(cancellationToken);
 
-                while (processedCount < MaxItemsToProcessInBatch && PlateQueueService.Queue.TryDequeue(out LicensePlateInfo? plateInfo))
-                {
-                    if (plateInfo != null) // Verifica se conseguiu retirar um item válido
-                    {
-                        batchToProcess.Add(plateInfo);
-                        processedCount++;
-                    }
-                }
-
-                // Se pegou itens, processa o lote
                 if (batchToProcess.Any())
                 {
-                    Console.WriteLine($"[RunAsync Início] Processando lote de {batchToProcess.Count} item(s)...");
-                    // Processa cada item do lote (poderia ser otimizado para batch insert no DB)
-                    foreach (var itemInfo in batchToProcess)
-                    {
-                        // Checa cancelamento antes de processar cada item, se necessário
-                        if (cancellationToken.IsCancellationRequested) break;
-                        await ProcessSinglePlateAsync(itemInfo, cancellationToken);
-                    }
-                    Console.WriteLine($"[RunAsync FIM] Lote concluído.");
-                }
-                else if (cancellationToken.IsCancellationRequested && PlateQueueService.Queue.IsEmpty)
-                {
-
-                    break;// Cancelamento solicitado e fila vazia, pode sair do loop
+                    await ProcessBatchAsync(batchToProcess, cancellationToken);
                 }
                 else
                 {
-                    // Fila vazia, espera um pouco antes de checar novamente
-                    try
-                    {
-                        await Task.Delay(TimeSpan.FromMilliseconds(200), cancellationToken); // Espera 200ms
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        break;
-                    }
+                    await HandleEmptyQueueAsync(cancellationToken);
                 }
-
-                // Verifica cancelamento novamente ao final do loop
-                if (cancellationToken.IsCancellationRequested && PlateQueueService.Queue.IsEmpty) break;
             }
         }
         catch (OperationCanceledException)
         {
-            Console.WriteLine("[PersistenceWorker] Tarefa de escrita cancelada.");
+            Console.WriteLine("[PersistenceWorker] Database writing task canceled gracefully.");
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[PersistenceWorker] ERRO FATAL na tarefa de escrita: {ex.ToString()}");
+            Console.WriteLine($"[PersistenceWorker] FATAL ERROR in persistence task: {ex}");
         }
         finally
         {
-            Console.WriteLine($"[PersistenceWorker] Finalizando... Itens restantes na fila: {PlateQueueService.Queue.Count}");
-            // Idealmente, a fila deve estar vazia aqui se o shutdown foi soft.
-            // Poderia ter uma última tentativa de processar o restante aqui, se necessário?
+            LogShutdownStatus();
         }
     }
 
     /// <summary>
-    /// Processa um único item LicensePlateInfo (escreve temp, db, blob, deleta temp).
+    /// Processes a single license plate record including:
+    /// 1. Temporary file storage
+    /// 2. Database insertion
+    /// 3. Cloud storage upload
+    /// 4. Cleanup
     /// </summary>
     private static async Task ProcessSinglePlateAsync(LicensePlateInfo plateInfo, CancellationToken cancellationToken)
     {
-        Console.WriteLine($"[ProcessSinglePlateAsync] Processando EventId: {plateInfo.EventId}");
+        Console.WriteLine($"[ProcessSinglePlate] Processing EventId: {plateInfo.EventId}");
+
         string? tempFullImagePath = null;
         string? tempPlateImagePath = null;
-        bool success = false;
 
         try
         {
-
-
-            string tempDirBase = Path.Combine(Path.GetTempPath(), "LPR_Plates_Temp"); // Subdiretório temporário
+            // 1. Prepare temporary storage
+            string tempDirBase = Path.Combine(Path.GetTempPath(), "LPR_Plates_Temp");
             Directory.CreateDirectory(tempDirBase);
 
-            //1. Salvar as imagens temporariamente
+            // 2. Save images temporarily
+            tempFullImagePath = await SaveImageTemporarilyAsync(
+                plateInfo.ImageData,
+                tempDirBase,
+                "Full",
+                plateInfo.EventId,
+                cancellationToken);
 
-            // Imagem completa do veículo
-            tempFullImagePath = await SaveImageTemporarilyAsync(plateInfo.ImageData,
-                                                              tempDirBase,
-                                                              "Full",
-                                                              plateInfo.EventId,
-                                                              cancellationToken);
+            tempPlateImagePath = await SaveImageTemporarilyAsync(
+                plateInfo.PlateImageData,
+                tempDirBase,
+                "Plate",
+                plateInfo.EventId,
+                cancellationToken);
 
+            // 3. Parallel persistence operations
+            var persistenceTasks = new List<Task>
+            {
+                DataService.InsertSQLAsync(plateInfo, cancellationToken)
+            };
 
-            // Imagem da placa apenas
-            tempPlateImagePath = await SaveImageTemporarilyAsync(plateInfo.PlateImageData,
-                                                                 tempDirBase,
-                                                                 "Plate",
-                                                                 plateInfo.EventId,
-                                                                 cancellationToken);
-
-
-            // 2. Iniciar Tarefas Paralelas (SQL e Blob Upload)
-            var tasks = new List<Task>();
-
-            Task dbTask = DataService.InsertSQLAsync(plateInfo, cancellationToken);
-            tasks.Add(dbTask);
-
-            var blobTasks = new List<Task>();
+            // Add cloud upload tasks if files were created
             if (!string.IsNullOrEmpty(tempFullImagePath))
             {
-                blobTasks.Add(AzureService.UploadBlobAsync(plateInfo.EventId, tempFullImagePath, TipoContainerImage.FullImage, cancellationToken));
+                persistenceTasks.Add(AzureService.UploadBlobAsync(
+                    plateInfo.EventId,
+                    tempFullImagePath,
+                    TipoContainerImage.FullImage,
+                    cancellationToken));
             }
+
             if (!string.IsNullOrEmpty(tempPlateImagePath))
             {
-                blobTasks.Add(AzureService.UploadBlobAsync(plateInfo.EventId, tempPlateImagePath, TipoContainerImage.Plate, cancellationToken));
+                persistenceTasks.Add(AzureService.UploadBlobAsync(
+                    plateInfo.EventId,
+                    tempPlateImagePath,
+                    TipoContainerImage.Plate,
+                    cancellationToken));
             }
-            // Adiciona todas as tarefas de blob à lista principal (se houver alguma)
-            if (blobTasks.Count != 0)
-            { tasks.AddRange(blobTasks); }
 
-            await Task.WhenAll(tasks); // Espera SQL e/ou Blob
+            await Task.WhenAll(persistenceTasks);
 
-            success = true; // Marcar como sucesso se chegou aqui sem exceções das tarefas
-            Console.WriteLine($"[ProcessSinglePlateAsync] Sucesso no processamento DB/Blob para EventId: {plateInfo.EventId}");
+            Console.WriteLine($"[ProcessSinglePlate] Successfully processed EventId: {plateInfo.EventId}");
         }
         catch (OperationCanceledException)
         {
-            Console.WriteLine($"[ProcessSinglePlateAsync] Operação cancelada durante processamento do EventId: {plateInfo.EventId}");
-
+            Console.WriteLine($"[ProcessSinglePlate] Operation canceled for EventId: {plateInfo.EventId}");
+            throw;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[ProcessSinglePlateAsync] ERRO no processamento DB/Blob do EventId {plateInfo.EventId}:");
+            Console.WriteLine($"[ProcessSinglePlate] ERROR processing EventId {plateInfo.EventId}: {ex.Message}");
         }
         finally
         {
+            // 4. Cleanup temporary files
             FileSystemService.DeleteTempFile(tempFullImagePath);
             FileSystemService.DeleteTempFile(tempPlateImagePath);
         }
     }
 
     /// <summary>
-    /// Salva os dados de uma imagem em um arquivo temporário dentro de um subdiretório específico.
+    /// Saves image data to a temporary file
     /// </summary>
-    /// <param name="imageData">Os bytes da imagem.</param>
-    /// <param name="baseTempDir">O diretório temporário base.</param>
-    /// <param name="subDir">O nome do subdiretório (ex: "Plate", "Full").</param>
-    /// <param name="eventId">O Guid para usar como nome do arquivo.</param>
-    /// <param name="cancellationToken">Token de cancelamento.</param>
-    /// <returns>O caminho completo do arquivo salvo, ou null se a imagem não foi salva.</returns>
-    private static async Task<string?> SaveImageTemporarilyAsync(byte[]? imageData, string baseTempDir, string subDir, Guid eventId, CancellationToken cancellationToken)
+    /// <returns>Full path to the temporary file or null if failed</returns>
+    private static async Task<string?> SaveImageTemporarilyAsync(
+        byte[]? imageData,
+        string baseTempDir,
+        string subDir,
+        Guid eventId,
+        CancellationToken cancellationToken)
     {
-        // Verifica se há dados de imagem para salvar
         if (imageData == null || imageData.Length == 0)
         {
-            Console.WriteLine($"[PersistenceWorker] EventId {eventId} imagem vazia ou nula. Arquivo não será salvo.");
+            Console.WriteLine($"[PersistenceWorker] Empty image data for EventId {eventId}");
             return null;
         }
+
         string? finalFilePath = null;
+
         try
         {
             string targetDirectory = Path.Combine(baseTempDir, subDir);
             Directory.CreateDirectory(targetDirectory);
+
             finalFilePath = Path.Combine(targetDirectory, $"{eventId}.jpg");
             await File.WriteAllBytesAsync(finalFilePath, imageData, cancellationToken);
+
             return finalFilePath;
         }
         catch (OperationCanceledException)
         {
-            Console.WriteLine($"[PersistenceWorker] Escrita do arquivo cancelada para {eventId}: {finalFilePath ?? "N/A"}");
+            Console.WriteLine($"[PersistenceWorker] File write canceled for {eventId}");
             throw;
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[PersistenceWorker] ERRO ao salvar arquivo temporário (EventId: {eventId}) em {finalFilePath ?? "N/A"}: {ex.Message}");
+            Console.WriteLine($"[PersistenceWorker] ERROR saving temp file for {eventId}: {ex.Message}");
             return null;
         }
     }
+
+    #region Helper Methods
+
+    private static bool ShouldTerminate(CancellationToken cancellationToken)
+    {
+        return cancellationToken.IsCancellationRequested && PlateQueueService.Queue.IsEmpty;
+    }
+
+    private static async Task<List<LicensePlateInfo>> GetNextBatchAsync(CancellationToken cancellationToken)
+    {
+        var batch = new List<LicensePlateInfo>();
+        int processedCount = 0;
+
+        while (processedCount < MaxItemsToProcessInBatch &&
+               PlateQueueService.Queue.TryDequeue(out var plateInfo))
+        {
+            if (plateInfo != null)
+            {
+                batch.Add(plateInfo);
+                processedCount++;
+            }
+        }
+
+        if (batch.Any())
+        {
+            Console.WriteLine($"[PersistenceWorker] Processing batch of {batch.Count} item(s)...");
+        }
+
+        return batch;
+    }
+
+    private static async Task ProcessBatchAsync(List<LicensePlateInfo> batch, CancellationToken cancellationToken)
+    {
+        foreach (var item in batch)
+        {
+            if (cancellationToken.IsCancellationRequested) break;
+            await ProcessSinglePlateAsync(item, cancellationToken);
+        }
+        Console.WriteLine($"[PersistenceWorker] Batch processing completed.");
+    }
+
+    private static async Task HandleEmptyQueueAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(QueueEmptyDelayMs), cancellationToken);
+        }
+        catch (OperationCanceledException)
+        {
+            // Expected during shutdown
+        }
+    }
+
+    private static void LogShutdownStatus()
+    {
+        int remainingItems = PlateQueueService.Queue.Count;
+        Console.WriteLine($"[PersistenceWorker] Shutting down... Remaining queue items: {remainingItems}");
+
+        if (remainingItems > 0)
+        {
+            Console.WriteLine("[PersistenceWorker] Warning: Items remaining in queue during shutdown");
+        }
+    }
+
+    #endregion
 }

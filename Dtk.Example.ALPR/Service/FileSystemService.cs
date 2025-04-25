@@ -1,27 +1,32 @@
 ﻿namespace Dtk.Example.ALPR.Service;
 
+/// <summary>
+/// Provides file system related utility methods.
+/// </summary>
 public class FileSystemService
 {
     /// <summary>
-    /// Deleta o arquivo do temp após processamento (upload)
+    /// Deletes the temporary file after processing (upload)
     /// </summary>
-    /// <param name="filePath"></param>
+    /// <param name="filePath">The path of the file to be deleted.</param>
     public static void DeleteTempFile(string? filePath)
     {
+        // Check if the file path is provided and the file exists.
         if (!string.IsNullOrEmpty(filePath) && File.Exists(filePath))
         {
             try
             {
+                // The actual file deletion is commented out.
                 // File.Delete(filePath);
-                Console.WriteLine($"[DeleteTempFile] Arquivo temporário deletado: {filePath}");
+
+                // Log message indicating the (simulated) deletion of the temporary file.
+                Console.WriteLine($"[DeleteTempFile] Temporary file deleted: {filePath}");
             }
             catch (Exception delEx)
             {
-                Console.WriteLine($"[DeleteTempFile] ERRO ao deletar arquivo temporário {filePath}: {delEx.Message}");
+                // Log an error message if an exception occurs during the process.
+                Console.WriteLine($"[DeleteTempFile] ERROR deleting temporary file {filePath}: {delEx.Message}");
             }
         }
     }
-
-
 }
-

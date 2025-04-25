@@ -13,29 +13,30 @@ namespace Dtk.Example.ALPR
 
         static async Task Main(string[] args)
         {
-            Console.WriteLine("Iniciando o serviço de LPR Multi-Câmera...");
+            Console.WriteLine("Starting Multi-Camera LPR Service...");
             urlCams = DataService.FuncaoRetornaListadeUrls();
             LPRParams parameters = new LPRParams
             {
 
-                Countries = "BR",
-                MinPlateWidth = 80,
-                MaxPlateWidth = 300,
-                DrawPlateBox = true,
-                FormatPlateText = true,
-                RecognitionOnMotion = true
+                Countries = "BR",       //Change for country (FR, IT, DE, ES, BR, ecc)
+                MinPlateWidth = 80,       // Minimum expected plate width in pixels
+                MaxPlateWidth = 300,      // Maximum expected plate width in pixels
+                DrawPlateBox = true,       // Enable visual plate rectangle overlay
+                FormatPlateText = true,    // Apply standard formatting to recognized plates
+                RecognitionOnMotion = true // Only process frames with motion detected
             };
+            // Register plate detection handler for the queue service
             Action<LicensePlateInfo> plateDetectedHandler = PlateQueueService.Enqueue;
 
+            // Start background task for persisting recognized plates to database
+            Console.WriteLine("Starting Background Task (DatabaseWriter)...");
+            _databaseWriterTask = PersistenceWorker.RunAsync(_appShutdownTokenSource.Token);
 
-            Console.WriteLine($"Iniciando Tarefa de Background (DatabaseWriter)...");
-            _databaseWriterTask = PersistenceWorker.RunAsync(_appShutdownTokenSource.Token); // Inicia o consumidor da fila
-
-
-            Console.WriteLine($"Configurando e iniciando processamento para {urlCams.Count} câmeras...");
+            // Initialize camera processing tasks for each video stream
+            Console.WriteLine($"Setting up and starting processing for {urlCams.Count} cameras...");
             foreach (string camUrl in urlCams)
             {
-                Console.WriteLine("Configurando processador para {CameraUrl} , RecognitionOnMotion={parameters}", camUrl, parameters.RecognitionOnMotion);
+                Console.WriteLine($"Initializing processor for {camUrl}, RecognitionOnMotion={parameters.RecognitionOnMotion}");
                 var processor = new CameraProcessor(
                     camUrl,
                     parameters,
@@ -45,12 +46,12 @@ namespace Dtk.Example.ALPR
 
                 _cameraProcessingTasks.Add(processor.StartProcessingAsync());
             }
-            Console.WriteLine($"Processamento iniciado para {_cameraProcessingTasks.Count} câmeras.");
-            Console.WriteLine("Pressione [Enter] para parar o serviço...");
+            Console.WriteLine($"Processing started for {_cameraProcessingTasks.Count} cameras.");
+            Console.WriteLine("Press [Enter] to stop the service...");
             Console.ReadLine();
 
-
-            Console.WriteLine("Recebido comando de parada. Solicitando cancelamento...");
+            // Begin controlled shutdown sequence
+            Console.WriteLine("Received stop command. Requesting cancellation...");
             try
             {
 
@@ -59,31 +60,32 @@ namespace Dtk.Example.ALPR
                     _appShutdownTokenSource.Cancel();
                 }
 
+                // Wait for all camera processors to complete
                 await Task.WhenAll(_cameraProcessingTasks);
 
-                if (_databaseWriterTask != null) // Verifica se a tarefa foi iniciada
+                // Ensure database writer completes final operations
+                if (_databaseWriterTask != null)
                 {
-                    await _databaseWriterTask; // Espera o writer terminar
+                    await _databaseWriterTask;
                 }
 
-              //  Log.Verbose("Todas as tarefas de processamento foram concluídas.");
+                // Log.Verbose("All processing tasks have completed successfully.");
             }
             catch (OperationCanceledException)
             {
-                Console.WriteLine("Processamento cancelado com sucesso");
-
+                Console.WriteLine("Processing canceled successfully");
             }
             catch (Exception ex)
             {
-               // Log.Fatal(ex, "Serviço ALPR terminado inesperadamente!");
+                // Log.Fatal(ex, "ALPR service terminated unexpectedly!");
             }
             finally
             {
-              //  Log.CloseAndFlush();
+                // Log.CloseAndFlush();
                 _appShutdownTokenSource.Dispose();
             }
 
-            Console.WriteLine("Serviço finalizado.");
+            Console.WriteLine("Service shutdown complete.");
         }
     }
 }
