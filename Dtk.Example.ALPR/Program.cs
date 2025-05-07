@@ -43,6 +43,10 @@ namespace Dtk.Example.ALPR
                     plateDetectedHandler,
                     _appShutdownTokenSource.Token
                 );
+                
+                await Task.Delay(1000);//without the delay there will be an error with more than 1 camera
+                //If you want I can show you how to do something more robust with SemaphoreSlim
+
 
                 _cameraProcessingTasks.Add(processor.StartProcessingAsync());
             }
