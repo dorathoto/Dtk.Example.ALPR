@@ -29,7 +29,6 @@ This is an **Automatic License Plate Recognition (ALPR)** system that:
   - **.NET 9** (or compatible version)
   - **DTK LPR License** (required to use the recognition library)
   - **IP cameras** configured with RTSP access
-  - **Azure Storage Account** (if using Blob Storage)
 
 ### **Initial Setup**
 
@@ -51,9 +50,7 @@ This is an **Automatic License Plate Recognition (ALPR)** system that:
 
 2.  **Configure the DTK LPR license** (refer to the official documentation).
 
-3.  **Set the Azure Blob Storage credentials** (in `AzureService.cs`).
-
-4.  **Run the project:**
+3.  **Run the project:**
 
     ```bash
     dotnet run
