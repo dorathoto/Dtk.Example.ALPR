@@ -17,6 +17,18 @@ public class CameraProcessor
     private LPREngine _engine;
     private VideoCapture _videoCapture;
 
+
+    //variable for restart processor
+    private int _restartAttempts = 0;
+    private const int MAX_RESTART_ATTEMPTS = 5; // Ou configurável via appsettings.json
+    private bool _isRestarting = false;
+    private readonly object _restartLock = new object();
+    private volatile bool _isDisposing = false; // Adicionar flag
+
+
+
+
+
     /// <summary>
     /// Initializes a new camera processor instance
     /// </summary>
@@ -54,6 +66,24 @@ public class CameraProcessor
                 {
                     Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] LICENSE WARNING: Status={licenseStatus}. Engine may not function properly.");
                 }
+                //string licenseErrorMessage = string.Empty;
+                //switch (licenseStatus)
+                //{
+                //    case 0:
+                //        break;
+                //    case 1:
+                //        licenseErrorMessage = "do not have a valid license";
+                //        break;
+                //    case 2:
+                //        licenseErrorMessage = "valid license but no channel available";
+                //        break;
+                //    case 3:
+                //        licenseErrorMessage = "unable to validate test license";
+                //        break;
+                //    default:
+                //        licenseErrorMessage = "license status unknown";
+                //        break;
+                //}
 
                 // Configure video capture with frame handler and error callback
                 _videoCapture = new VideoCapture(HandleFrameCaptured, OnCaptureError, _engine);
@@ -143,7 +173,7 @@ public class CameraProcessor
             // Convert full image to JPEG bytes
             byte[]? plateImageData = null;
             byte[]? imageData = null;
-
+            string cleanedPlate = plate.Text.Replace("-", "").ToUpperInvariant(); //format ABC1234 - uppercase and remove dash
             using (Image? img = plate.Image)
             {
                 if (img != null)
@@ -164,12 +194,17 @@ public class CameraProcessor
                     plateImageData = ms.ToArray();
                 }
             }
+            
+            //if (cleanedPlate.Length != 7)
+            //{
+            //    // Log or handle invalid plate length
+            //}
 
             // Package detection data for processing
             var plateInfo = new LicensePlateInfo
             {
                 EventId = eventId,
-                Text = plate.Text,
+                Text = cleanedPlate,
                 CountryCode = plate.CountryCode,
                 Confidence = plate.Confidence,
                 Direction = plate.Direction,
@@ -197,23 +232,139 @@ public class CameraProcessor
     /// <param name="videoCap">Video capture source</param>
     /// <param name="errorCode">Error type</param>
     /// <param name="customObject">Associated object</param>
-    public void OnCaptureError(VideoCapture videoCap, ERR_CAPTURE errorCode, object customObject)
+    public async void OnCaptureError(VideoCapture videoCap, ERR_CAPTURE errorCode, object customObject)
     {
-        if (_cancellationToken.IsCancellationRequested) return;
+        // If cancellation has been requested or the object is being disposed, exit the method.
+        if (_cancellationToken.IsCancellationRequested || _isDisposing) return;
 
-        Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] CAPTURE ERROR: Code={errorCode}");
-
-        // Implement error-specific recovery logic
-        switch (errorCode)
+        // Checks if the error code indicates an End Of File, a frame reading error, or an error opening the video.
+        // These are typically recoverable errors that might warrant a restart attempt.
+        if (errorCode == ERR_CAPTURE.EOF || errorCode == ERR_CAPTURE.READ_FRAME || errorCode == ERR_CAPTURE.OPEN_VIDEO)
         {
-            case ERR_CAPTURE.EOF:
-                // Handle end-of-stream scenarios
-                break;
-            case ERR_CAPTURE.READ_FRAME:
-            case ERR_CAPTURE.OPEN_VIDEO:
-                // Consider implementing reconnection logic
-                break;
+            bool performRestart = false;
+            int currentAttempt = 0;
+
+            // Thread-safe block to check and update restart state.
+            lock (_restartLock)
+            {
+                // Only attempts to restart if it is not already restarting, is not disposing,
+                // and has not reached the maximum restart attempt limit.
+                if (!_isRestarting && !_isDisposing && _restartAttempts < MAX_RESTART_ATTEMPTS)
+                {
+                    _isRestarting = true; // Mark that a restart process is now in progress.
+                    _restartAttempts++;  // Increment the count of restart attempts.
+                    currentAttempt = _restartAttempts; // Store the current attempt number.
+                    performRestart = true;    // Set flag to proceed with the restart logic.
+                }
+            }
+
+            // If the conditions for a restart are met.
+            if (performRestart)
+            {
+                // Calculate delay with exponential backoff using base 4 (e.g., 4s, 16s, 64s, 256s, 960s).
+                // The delay is capped at 960 seconds.
+                int delaySeconds = (int)Math.Min(Math.Pow(4, currentAttempt), 960);
+                Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] Capture error ({errorCode}). Attempting to restart in {delaySeconds} seconds... (Attempt {currentAttempt}/{MAX_RESTART_ATTEMPTS})");
+
+                try
+                {
+                    // 1. Safely stop the current capture, if active.
+                    if (_videoCapture != null)
+                    {
+                        Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] Stopping VideoCapture before restarting...");
+                        _videoCapture.StopCapture(); // May throw ObjectDisposedException if already disposed.
+                    }
+
+                    // 2. Wait for the calculated delay, respecting cancellation.
+                    await Task.Delay(TimeSpan.FromSeconds(delaySeconds), _cancellationToken);
+
+                    // Re-check conditions after the delay, before actually attempting reinitialization.
+                    if (_cancellationToken.IsCancellationRequested || _isDisposing)
+                    {
+                        Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] Restart aborted (cancellation or dispose) after delay.");
+                        lock (_restartLock) { _isRestarting = false; } // Release the restart lock.
+                        return;
+                    }
+
+                    Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] Attempting to restart capture now (Attempt {currentAttempt}/{MAX_RESTART_ATTEMPTS})...");
+
+                    // 3. Completely dispose of the old VideoCapture instance.
+                    _videoCapture?.Dispose(); // Calls Dispose to release native resources.
+                    _videoCapture = null;     // Set to null so it will be recreated.
+
+                    // 4. Check the LPREngine before proceeding.
+                    if (_engine == null)
+                    {
+                        Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] CRITICAL: LPREngine is null. Cannot restart VideoCapture. Aborting restart for this camera.");
+                        lock (_restartLock)
+                        {
+                            _isRestarting = false;
+                            // Mark as a permanent failure to avoid further attempts if the engine failed.
+                            _restartAttempts = MAX_RESTART_ATTEMPTS;
+                        }
+                        return;
+                    }
+
+                    // Checking for a license bug, not sure if it can happen, but for assurance.
+                    int licenseStatus = _engine.IsLicensed;
+                    if (licenseStatus != 0) // 0 typically means licensed and OK.
+                    {
+                        Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] CRITICAL: LPREngine is not licensed (Status: {licenseStatus}). Cannot restart VideoCapture. Aborting restart for this camera.");
+                        lock (_restartLock)
+                        {
+                            _isRestarting = false;
+                            // Mark as a permanent failure.
+                            _restartAttempts = MAX_RESTART_ATTEMPTS;
+                        }
+                        return;
+                    }
+
+                    // 5. Recreate and restart VideoCapture (the LPREngine is reused).
+                    _videoCapture = new VideoCapture(HandleFrameCaptured, OnCaptureError, _engine); // Reuses the same _engine.
+                    int captureStartResult = _videoCapture.StartCaptureFromIPCamera(_cameraUrl);
+
+                    if (captureStartResult == 0) // 0 typically indicates success.
+                    {
+                        Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] Capture RESTARTED successfully after error (Attempt {currentAttempt}).");
+                        lock (_restartLock)
+                        {
+                            _restartAttempts = 0; // Reset counter after success.
+                        }
+                    }
+                    else
+                    {
+                        Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] Failed to RESTART VideoCapture. DTK error code: {captureStartResult}. (Attempt {currentAttempt}/{MAX_RESTART_ATTEMPTS})");
+                    }
+                }
+                catch (OperationCanceledException) // If Task.Delay is canceled.
+                {
+                    Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] Restart attempt canceled during delay or operation.");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] Unexpected exception during restart attempt (Attempt {currentAttempt}). Exception: {ex.Message}");
+                }
+                finally
+                {
+                    // Always release the restart flag in a thread-safe manner.
+                    lock (_restartLock)
+                    {
+                        _isRestarting = false;
+                    }
+                }
+            }
+            // This block is executed if a restart was not performed, either because it's already restarting,
+            // being disposed, or the maximum restart attempts have been reached.
+            else if (!_isDisposing && _restartAttempts >= MAX_RESTART_ATTEMPTS)
+            {
+                Console.WriteLine($"[Thread:{Thread.CurrentThread.ManagedThreadId}][{_cameraUrl}] Maximum restart attempts ({MAX_RESTART_ATTEMPTS}) reached for error {errorCode}. Giving up on restarting this camera automatically. Manual intervention required.");
+                // Logic can be added here to notify an external monitoring system
+                // or mark this camera as "permanently offline" within the application,
+                // so it no longer consumes resources trying to process it.
+            }
         }
+        // If the error code is not one of the specified recoverable errors, it's logged by the caller or handled elsewhere.
+        // No specific action is taken in this method for other error codes.
     }
 
     /// <summary>
