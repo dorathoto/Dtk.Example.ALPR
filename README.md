@@ -127,6 +127,11 @@ Now uses `MoveMemory` to avoid issues on 64-bit systems.
   - [ ] Add **monitoring** (Prometheus + Grafana).
   - [ ] Add **Docker** support for simplified deployment.
 
+## **Branchs**
+there are 2 branches
+  - simple_example - simpler branch with the basics to work. (but still a decoupled project)
+  - stage - the best of the best
+
 -----
 
 ## **Contribution**
