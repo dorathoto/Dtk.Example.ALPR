@@ -6,7 +6,7 @@ This is an **Automatic License Plate Recognition (ALPR)** system that:
   - Processes frames in real-time using the **[DTK LPR library](https://www.dtksoft.com/lprsdk)**.
   - Stores data in a **database** and images in **Azure Blob Storage**.
   - Operates in **multithread**, allowing simultaneous processing of multiple cameras.
-  - 
+
 
 > PS. Why use DTK Software and not Rekor, Plate Recnogize, etc.? Cost!
 > It has quality equivalent to all the others at a lower cost. However,
